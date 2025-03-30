@@ -24,6 +24,7 @@ import (
 	"os/signal"
 	"path/filepath"
 	"runtime"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
@@ -52,6 +53,7 @@ func main() {
 	socketPath := flag.String("l", "", "agent: path of the UNIX socket to listen on")
 	resetFlag := flag.Bool("really-delete-all-piv-keys", false, "setup: reset the PIV applet")
 	setupFlag := flag.Bool("setup", false, "setup: configure a new YubiKey")
+	slotsFlag := flag.String("slots", "9a", "agent: comma-separated list of PIV slots to use for the SSH key")
 	flag.Parse()
 
 	if flag.NArg() > 0 {
@@ -71,18 +73,54 @@ func main() {
 			flag.Usage()
 			os.Exit(1)
 		}
-		runAgent(*socketPath)
+		runAgent(*socketPath, *slotsFlag)
 	}
 }
 
-func runAgent(socketPath string) {
+func parseSlots(slotsStr string) []piv.Slot {
+	split := strings.Split(slotsStr, ",")
+	slots := make([]piv.Slot, 0, len(split))
+	for _, slot := range split {
+		slotKey, err := strconv.ParseInt(slot, 0, 0)
+		if err != nil {
+			log.Fatalf("Invalid slot number: %s", slot)
+		}
+
+		switch slotKey {
+		case 0x9a:
+			slots = append(slots, piv.SlotAuthentication)
+		case 0x9c:
+			slots = append(slots, piv.SlotSignature)
+		case 0x9d:
+			slots = append(slots, piv.SlotKeyManagement)
+		case 0x9e:
+			slots = append(slots, piv.SlotCardAuthentication)
+		default:
+			res, ok := piv.RetiredKeyManagementSlot(uint32(slotKey))
+			if !ok {
+				log.Fatalf("Unrecognized slot number: %s", slot)
+			}
+			slots = append(slots, res)
+		}
+	}
+
+	return slots
+}
+
+func runAgent(socketPath string, slotsStr string) {
 	if terminal.IsTerminal(int(os.Stdin.Fd())) {
 		log.Println("Warning: yubikey-agent is meant to run as a background daemon.")
 		log.Println("Running multiple instances is likely to lead to conflicts.")
 		log.Println("Consider using the launchd or systemd services.")
 	}
 
-	a := &Agent{}
+	a := &Agent{
+		slots: parseSlots(slotsStr),
+	}
+
+	for _, slot := range a.slots {
+		log.Printf("Using PIV slot %x", slot.Key)
+	}
 
 	c := make(chan os.Signal)
 	signal.Notify(c, syscall.SIGHUP)
@@ -127,6 +165,8 @@ type Agent struct {
 	// more than a few seconds for the touch operation. It is paused and reset
 	// by getPIN so it won't fire while waiting for the PIN.
 	touchNotification *time.Timer
+
+	slots []piv.Slot
 }
 
 var _ agent.ExtendedAgent = &Agent{}
@@ -232,15 +272,19 @@ func (a *Agent) List() ([]*agent.Key, error) {
 	}
 	defer a.maybeReleaseYK()
 
-	pk, err := getPublicKey(a.yk, piv.SlotAuthentication)
-	if err != nil {
-		return nil, err
+	keys := make([]*agent.Key, 0, len(a.slots))
+	for _, slot := range a.slots {
+		pk, err := getPublicKey(a.yk, slot)
+		if err != nil {
+			return nil, err
+		}
+		keys = append(keys, &agent.Key{
+			Format:  pk.Type(),
+			Blob:    pk.Marshal(),
+			Comment: fmt.Sprintf("YubiKey #%d PIV Slot %x", a.serial, slot.Key),
+		})
 	}
-	return []*agent.Key{{
-		Format:  pk.Type(),
-		Blob:    pk.Marshal(),
-		Comment: fmt.Sprintf("YubiKey #%d PIV Slot 9a", a.serial),
-	}}, nil
+	return keys, nil
 }
 
 func getPublicKey(yk *piv.YubiKey, slot piv.Slot) (ssh.PublicKey, error) {
@@ -274,23 +318,28 @@ func (a *Agent) Signers() ([]ssh.Signer, error) {
 }
 
 func (a *Agent) signers() ([]ssh.Signer, error) {
-	pk, err := getPublicKey(a.yk, piv.SlotAuthentication)
-	if err != nil {
-		return nil, err
+	signers := make([]ssh.Signer, 0, len(a.slots))
+
+	for _, slot := range a.slots {
+		pk, err := getPublicKey(a.yk, slot)
+		if err != nil {
+			return nil, err
+		}
+		priv, err := a.yk.PrivateKey(
+			piv.SlotAuthentication,
+			pk.(ssh.CryptoPublicKey).CryptoPublicKey(),
+			piv.KeyAuth{PINPrompt: a.getPIN},
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare private key: %w", err)
+		}
+		s, err := ssh.NewSignerFromKey(priv)
+		if err != nil {
+			return nil, fmt.Errorf("failed to prepare signer: %w", err)
+		}
+		signers = append(signers, s)
 	}
-	priv, err := a.yk.PrivateKey(
-		piv.SlotAuthentication,
-		pk.(ssh.CryptoPublicKey).CryptoPublicKey(),
-		piv.KeyAuth{PINPrompt: a.getPIN},
-	)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare private key: %w", err)
-	}
-	s, err := ssh.NewSignerFromKey(priv)
-	if err != nil {
-		return nil, fmt.Errorf("failed to prepare signer: %w", err)
-	}
-	return []ssh.Signer{s}, nil
+	return signers, nil
 }
 
 func (a *Agent) Sign(key ssh.PublicKey, data []byte) (*ssh.Signature, error) {
