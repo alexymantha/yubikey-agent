@@ -1,5 +1,9 @@
 # yubikey-agent
 
+> [!NOTE]
+> Fork of https://github.com/FiloSottile/yubikey-agent with support for multiple keys in multiple slots 
+  as well as ED25519 key support.
+
 yubikey-agent is a seamless ssh-agent for YubiKeys.
 
 * **Easy to use.** A one-command setup, one environment variable, and it just runs in the background.
