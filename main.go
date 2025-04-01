@@ -326,7 +326,7 @@ func (a *Agent) signers() ([]ssh.Signer, error) {
 			return nil, err
 		}
 		priv, err := a.yk.PrivateKey(
-			piv.SlotAuthentication,
+			slot,
 			pk.(ssh.CryptoPublicKey).CryptoPublicKey(),
 			piv.KeyAuth{PINPrompt: a.getPIN},
 		)
