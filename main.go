@@ -328,7 +328,7 @@ func (a *Agent) signers() ([]ssh.Signer, error) {
 		priv, err := a.yk.PrivateKey(
 			slot,
 			pk.(ssh.CryptoPublicKey).CryptoPublicKey(),
-			piv.KeyAuth{PINPrompt: a.getPIN, PINPolicy: piv.PINPolicyOnce},
+			piv.KeyAuth{PINPrompt: a.getPIN, PINPolicy: piv.PINPolicyNever},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to prepare private key: %w", err)
