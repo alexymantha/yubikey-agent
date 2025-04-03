@@ -166,6 +166,8 @@ type Agent struct {
 	// by getPIN so it won't fire while waiting for the PIN.
 	touchNotification *time.Timer
 
+	pin string
+
 	slots []piv.Slot
 }
 
@@ -260,8 +262,16 @@ func (a *Agent) getPIN() (string, error) {
 	if a.touchNotification != nil && a.touchNotification.Stop() {
 		defer a.touchNotification.Reset(5 * time.Second)
 	}
+
+	if a.pin != "" {
+		return a.pin, nil
+	}
+
 	r, _ := a.yk.Retries()
-	return getPIN(a.serial, r)
+	pin, err := getPIN(a.serial, r)
+	a.pin = pin
+
+	return pin, err
 }
 
 func (a *Agent) List() ([]*agent.Key, error) {
@@ -328,7 +338,7 @@ func (a *Agent) signers() ([]ssh.Signer, error) {
 		priv, err := a.yk.PrivateKey(
 			slot,
 			pk.(ssh.CryptoPublicKey).CryptoPublicKey(),
-			piv.KeyAuth{PINPrompt: a.getPIN, PINPolicy: piv.PINPolicyNever},
+			piv.KeyAuth{PINPrompt: a.getPIN, PINPolicy: piv.PINPolicyAlways},
 		)
 		if err != nil {
 			return nil, fmt.Errorf("failed to prepare private key: %w", err)
